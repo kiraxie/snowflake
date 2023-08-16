@@ -3,7 +3,7 @@ package snowflake
 import (
 	"errors"
 	"strconv"
-	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -51,32 +51,30 @@ type Snowflake struct {
 	machineBits  int64
 	sequenceBits int64
 	sequenceMask int64
-	mu           sync.Mutex
 	lastTS       int64
 	sequence     int64
 }
 
 func (t *Snowflake) Next() int64 {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	now := nowInMillis(t.Epoch)
-
-	if now == t.lastTS {
-		t.sequence = (t.sequence + 1) & t.sequenceMask
-
-		if t.sequence == 0 {
-			now = TillNexMillis(t.lastTS + t.Epoch)
+	for {
+		last := atomic.LoadInt64(&t.lastTS)
+		seq := atomic.LoadInt64(&t.sequence)
+		next := atomic.LoadInt64(&t.sequence)
+		now := nowInMillis(t.Epoch)
+		if now == last {
+			if next = (next + 1) & t.sequenceMask; next == 0 {
+				now = TillNexMillis(last + t.Epoch)
+			}
+		} else {
+			next = 0
 		}
-	} else {
-		t.sequence = 0
+
+		if atomic.CompareAndSwapInt64(&t.lastTS, last, now) && atomic.CompareAndSwapInt64(&t.sequence, seq, next) {
+			return ((now)<<timeShift |
+				(t.MachineID << t.machineBits) |
+				(next))
+		}
 	}
-
-	t.lastTS = now
-
-	return ((now)<<timeShift |
-		(t.MachineID << t.machineBits) |
-		(t.sequence))
 }
 
 func (t *Snowflake) NextString() string {
